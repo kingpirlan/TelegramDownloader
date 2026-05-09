@@ -1,135 +1,83 @@
-name: 📝 Telegram Text/Caption Downloader
+name: 📝 Telegram Text Downloader
 
 on:
   workflow_dispatch:
     inputs:
       telegram_link:
-        description: '🔗 Telegram post link (t.me/...)'
+        description: '🔗 Telegram Link'
         required: true
         type: string
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
-  extract-text:
+  download:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
     steps:
-      - name: 📂 Clone repository
-        uses: actions/checkout@v4
-
-      - name: 🔧 Install dependencies
+      - uses: actions/checkout@v4
+      
+      - name: Setup
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y curl jq grep sed
-
-      - name: 📡 Extract TEXT/Caption
-        id: extract
+          sudo apt update -qq
+          sudo apt install -y curl grep sed jq
+          
+      - name: Extract Text
+        id: text
         run: |
-          LINK="${{ github.event.inputs.telegram_link }}"
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "🔗 Processing: $LINK"
-          echo "═══════════════════════════════════════════════════════════════"
+          URL="${{ github.event.inputs.telegram_link }}"
           
-          # Extract channel/post ID
-          CHANNEL=$(echo "$LINK" | sed 's|https\?://t\.me/||;s|/.*||')
-          POST_ID=$(echo "$LINK" | sed 's|.*/||;s|s/||')
+          echo "Processing: $URL"
           
-          echo "👥 Channel: @$CHANNEL"
-          echo "🆔 Post ID: $POST_ID"
+          CH=$(echo "$URL" | sed 's|https\?://[^/]\+/||;s|/.*||')
+          ID=$(echo "$URL" | sed 's|.*/||')
           
-          # Download page with full headers
-          echo "🔍 Downloading page..."
-          HTML=$(curl -s --http1.1 --max-time 30 \
-            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8" \
-            -H "Accept-Language: en-US,en;q=0.9,fa;q=0.8" \
-            -H "Sec-Fetch-Dest: document" \
-            -H "Sec-Fetch-Mode: navigate" \
-            -H "Sec-Fetch-Site: none" \
-            -H "Sec-Fetch-User: ?1" \
-            -H "Upgrade-Insecure-Requests: 1" \
-            "$LINK")
+          HTML=$(curl -s "$URL" -H "User-Agent: Mozilla/5.0")
           
-          # Method 1: tgme_widget_message_text (primary)
-          TEXT=$(echo "$HTML" | grep -A 20 -B 5 'tgme_widget_message_text' | \
-            grep -o '">[^<]\{1,\}<' | sed 's/">//;s/<$//' | \
-            tr -d '\n\r' | sed 's/"/"/g;s/&/\&/g;s/</</g;s/>/>/g;s/'/'\''/g;s/ / /g' | \
-            sed 's/<br[^>]*>/\n/g' | sed 's/<[^>]*>//g' | \
-            tr -s ' \t\n' ' ' | sed 's/^ //;s/ $//' | head -c 8000)
+          CAPTION=$(echo "$HTML" | grep -A10 "tgme_widget_message_text" | grep -o '">[^"]\{20,\}<' | sed 's/">//;s/<.*//' | head -1 | sed 's/"/"/g;s/&/\&/g')
           
-          # Method 2: Any message text div
-          if [ -z "$TEXT" ] || [ ${#TEXT} -lt 5 ]; then
-            TEXT=$(echo "$HTML" | grep -o '<div[^>]*message[^>]*>[^<]\{10,\}</div>' | \
-              head -3 | sed 's|<div[^>]*>||g;s|</div>||g' | \
-              sed 's/&[^;]*;//g' | tr -d '\n\r' | sed 's/  */ /g' | head -c 2000)
+          if [ -z "$CAPTION" ]; then
+            CAPTION=$(echo "$HTML" | grep -o '<title>.*</title>' | sed 's/<title>\(.*\) - Telegram<\/title>/\1/')
           fi
           
-          # Method 3: Title fallback
-          if [ -z "$TEXT" ] || [ ${#TEXT} -lt 5 ]; then
-            TEXT=$(echo "$HTML" | grep -o '<title>.*</title>' | sed 's/<[^>]*>//g' | sed 's/ - Telegram$//')
+          if [ -z "$CAPTION" ]; then
+            CAPTION="No caption found"
           fi
           
-          # Method 4: Meta description
-          if [ -z "$TEXT" ] || [ ${#TEXT} -lt 5 ]; then
-            TEXT=$(echo "$HTML" | grep -o 'name="description" content="[^"]*"' | sed 's/.*content="//;s/"$//' | head -c 500)
-          fi
+          LEN=${#CAPTION}
           
-          # Final cleanup
-          TEXT=$(echo "$TEXT" | sed 's/^"//;s/"$//' | sed 's/^[ \t]*//;s/[ \t]*$//' | sed 's/  */ /g' | sed 's/\.\.\.$//')
+          echo "Channel: $CH"
+          echo "Caption ($LEN chars): ${CAPTION:0:100}"
           
-          if [ -z "$TEXT" ] || [ ${#TEXT} -le 2 ]; then
-            TEXT="[هیچ متن/کپشنی یافت نشد]"
-          fi
-          
-          LENGTH=$(echo -n "$TEXT" | wc -c)
-          TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-          
-          echo "✅ استخراج موفق!"
-          echo "📊 طول: $LENGTH کاراکتر"
-          echo "📝 پیش‌نمایش: ${TEXT:0:120}"
-          echo "═══════════════════════════════════════════════════════════════"
-          
-          # Save metadata
-          jq -n \
-            --arg link "$LINK" \
-            --arg channel "$CHANNEL" \
-            --arg post_id "$POST_ID" \
-            --arg timestamp "$TIMESTAMP" \
-            --argjson length "$LENGTH" \
-            --arg text "$TEXT" \
-            '{link:$link,channel:$channel,post_id:$post_id,timestamp:$timestamp,length:$length,text:$text}' \
-            > metadata_$POST_ID.json
-          
-          # Set outputs
           echo "text<<EOF" >> $GITHUB_OUTPUT
-          echo "$TEXT" >> $GITHUB_OUTPUT
+          echo "$CAPTION" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "channel=$CHANNEL" >> $GITHUB_OUTPUT
-          echo "post_id=$POST_ID" >> $GITHUB_OUTPUT
-          echo "length=$LENGTH" >> $GITHUB_OUTPUT
-
-      - name: 💾 Create files
+          echo "channel=$CH" >> $GITHUB_OUTPUT
+          echo "id=$ID" >> $GITHUB_OUTPUT
+          
+      - name: Save Files
         run: |
-          TEXT="${{ steps.extract.outputs.text }}"
-          CHANNEL="${{ steps.extract.outputs.channel }}"
-          POST_ID="${{ steps.extract.outputs.post_id }}"
-          LENGTH="${{ steps.extract.outputs.length }}"
-          LINK="${{ github.event.inputs.telegram_link }}"
+          TEXT="${{ steps.text.outputs.text }}"
+          CH="${{ steps.text.outputs.channel }}"
+          ID="${{ steps.text.outputs.id }}"
           
-          mkdir -p "texts/$CHANNEL"
+          mkdir -p texts/$CH
           
-          # 1. Raw text file
-          echo "$TEXT" > "texts/$CHANNEL/post_${POST_ID}.txt"
+          echo "$TEXT" > texts/$CH/$ID.txt
           
-          # 2. Markdown file (template method)
-          cat > "texts/$CHANNEL/post_${POST_ID}.md" << 'EOF'
-# 📱 @CHANNEL@ | پست #POST_ID@
+          cat > texts/$CH/$ID.md << END
+# @$CH - Post $ID
 
-**🔗 لینک اصلی:** [مشاهده](LINK@) 📅 تاریخ استخراج:** DATE@  
-**📏 طول متن:** LENGTH@ کاراکتر
+**Link:** ${{ github.event.inputs.telegram_link }} Length:** ${#TEXT} chars
 
----
+\`\`\`
+$TEXT
+\`\`\`
+END
+          
+          echo "Saved: texts/$CH/$ID.*"
+          
+      - name: Commit
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add texts/
+          git commit -m "Add @$CH post $ID [skip ci]" || exit 0
+          git push || exit 0
