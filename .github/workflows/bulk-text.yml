@@ -1,0 +1,89 @@
+name: 📱 Bulk Telegram Text Extractor
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel_id:
+        description: '👥 Channel username (crgaming7)'
+        required: true
+        type: string
+      count:
+        description: '📊 Number of posts (default: 10)'
+        required: false
+        type: number
+        default: 10
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup
+        run: |
+          sudo apt update -qq
+          sudo apt install -y curl grep sed jq
+          
+      - name: Extract Last N Posts
+        run: |
+          CHANNEL="${{ github.event.inputs.channel_id }}"
+          COUNT="${{ github.event.inputs.count }}"
+          
+          echo "📱 Extracting $COUNT posts from @$CHANNEL"
+          
+          mkdir -p texts/$CHANNEL
+          
+          # Get channel page (last 20 posts)
+          HTML=$(curl -s "https://t.me/s/$CHANNEL" -H "User-Agent: Mozilla/5.0")
+          
+          # Extract post links
+          POST_LINKS=$(echo "$HTML" | grep -o 'href="https://t.me/[^"]*"' | grep -v '/s/' | sed 's/href="//;s/"$//' | head -$COUNT | sort -u)
+          
+          echo "Found $(echo "$POST_LINKS" | wc -l) posts"
+          
+          i=1
+          echo "$POST_LINKS" | while read LINK; do
+            echo "[$i/$COUNT] $LINK"
+            
+            POST_HTML=$(curl -s "$LINK" -H "User-Agent: Mozilla/5.0")
+            
+            # Extract caption (multiple methods)
+            CAPTION=$(echo "$POST_HTML" | grep -A10 "tgme_widget_message_text" | sed 's/<[^>]*>//g' | tr -d '\n\r' | sed 's/"/"/g;s/&/\&/g' | sed 's/  */ /g' | head -c 2000)
+            
+            if [ -z "$CAPTION" ]; then
+              CAPTION=$(echo "$POST_HTML" | grep -o 'class="tgme_widget_message_text"[^>]*>.*?</div>' | sed 's/<[^>]*>//g' | head -1)
+            fi
+            
+            if [ -z "$CAPTION" ] || [ ${#CAPTION} -lt 5 ]; then
+              CAPTION="[No caption]"
+            fi
+            
+            # Save
+            echo "$CAPTION" > "texts/$CHANNEL/post_$i.txt"
+            echo "# Post $i
+Link: $LINK
+
+\`\`\`
+$CAPTION
+\`\`\`" > "texts/$CHANNEL/post_$i.md"
+            
+            i=$((i+1))
+            sleep 1
+          done
+          
+          echo "✅ Saved to texts/$CHANNEL/"
+
+      - name: Commit
+        run: |
+          git config user.name "TelegramBot"
+          git config user.email "bot@example.com"
+          git add texts/
+          git commit -m "📱 @$CHANNEL: ${{ github.event.inputs.count }} posts" || exit 0
+          git push
+          
+      - name: Report
+        run: |
+          CHANNEL="${{ github.event.inputs.channel_id }}"
+          COUNT="${{ github.event.inputs.count }}"
+          echo "🎉 Done! Check: texts/$CHANNEL/"
+          ls -la texts/$CHANNEL/ || echo "No files"
