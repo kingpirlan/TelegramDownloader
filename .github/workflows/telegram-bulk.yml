@@ -1,0 +1,35 @@
+name: 📱 Telegram Bulk Text
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Channel ID (crgaming7)'
+        required: true
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Extract
+      run: |
+        CHANNEL="${{ github.event.inputs.channel }}"
+        HTML=$(curl -s "https://t.me/s/$CHANNEL")
+        
+        # Find post texts
+        POSTS=$(echo "$HTML" | grep -A5 -B2 "tgme_widget_message_text\|tgme_widget_message" | sed 's/<[^>]*>//g' | sed 's/"/"/g' | sed 's/^[ \t]*//;s/[ \t]*$//' | grep -v '^$' | paste -sd ' ')
+        
+        # Split into files
+        mkdir -p texts/$CHANNEL
+        echo "$POSTS" | fold -w 1000 | split -l 1 - texts/$CHANNEL/post_
+        
+        # Summary
+        echo "$POSTS" | head -10 > texts/$CHANNEL/summary.txt
+        
+    - name: Upload
+      run: |
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        git add texts/
+        git commit -m "📱 $CHANNEL texts" || exit 0
+        git push
