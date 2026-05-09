@@ -13,6 +13,9 @@ on:
         type: boolean
         default: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # ✅ Fix Node.js warning
+
 jobs:
   extract-text:
     runs-on: ubuntu-latest
@@ -22,13 +25,11 @@ jobs:
     steps:
       - name: 📂 Clone repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🔧 Install dependencies
+      - name: 🔧 Install dependencies (minimal)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y curl jq htmlq pup
+          sudo apt-get install -y curl jq grep sed
 
       - name: 📡 Extract TEXT/CAPTION from Telegram
         id: extract
@@ -39,47 +40,63 @@ jobs:
           echo "🔗 Processing: $LINK"
           echo "═══════════════════════════════════════════════════════════════"
           
-          # Method 1: Try Telegram proxy API first
-          TEXT=$(curl -s --max-time 30 \
-            -H "User-Agent: Mozilla/5.0" \
-            "https://t.me/proxy?server=proxy.mtproto.co&port=443&secret=ee00000000000000000000000000000000&url=$LINK" \
-            | pup 'text{}' 2>/dev/null | tr -d '\n' | sed 's/ +/ /g' | sed 's/  */ /g')
-          
-          if [ -z "$TEXT" ] || [ ${#TEXT} -lt 5 ]; then
-            # Method 2: Web scraper (most reliable)
-            echo "🔍 Web scraping..."
-            HTML=$(curl -s --http1.1 --max-time 30 \
-              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              -H "Accept: text/html" \
-              -H "Referer: https://t.me/" \
-              "$LINK")
-            
-            # Extract caption/text using pup (CSS selector)
-            TEXT=$(echo "$HTML" | pup '.tgme_widget_message_text text{}' 2>/dev/null)
-            
-            if [ -z "$TEXT" ]; then
-              # Fallback: grep patterns
-              TEXT=$(echo "$HTML" | grep -oP '(?<=<div class="tgme_widget_message_text js-message_text[^"]*">).*?(?=</div>)' | sed 's/<br>/\n/g' | sed 's/"/"/g' | sed 's/&/\&/g' | sed 's/<\/?\w[^>]*>//g')
-            fi
-          fi
-          
-          # Clean text
-          TEXT=$(echo "$TEXT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed 's/  */ /g')
-          
-          if [ -z "$TEXT" ]; then
-            TEXT="[No caption/text found]"
-          fi
-          
-          # Get post info
           CHANNEL=$(echo "$LINK" | sed -n 's|https\?://t\.me/\([^/]\+\).*|\1|p')
-          POST_ID=$(echo "$LINK" | sed -n 's|.*\/\(s/[0-9]\+\)|\1|p' | sed 's|s/||')
-          [ -z "$POST_ID" ] && POST_ID=$(echo "$LINK" | sed -n 's|.*\/\(\d\+\)$|\1|p')
+          POST_ID=$(echo "$LINK" | sed -n 's|.*/\([0-9]\+\)$|\1|p' | head -1)
+          [ -z "$POST_ID" ] && POST_ID=$(echo "$LINK" | sed -n 's|.*/s/\([0-9]\+\)$|\1|p')
+          
+          echo "👥 Channel: @$CHANNEL | Post: #$POST_ID"
+          
+          # Method 1: Direct HTML scraping (most reliable)
+          echo "🔍 Scraping page..."
+          HTML=$(curl -s --http1.1 --max-time 30 \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+            -H "Accept-Language: en-US,en;q=0.5" \
+            -H "Accept-Encoding: gzip, deflate" \
+            -H "Connection: keep-alive" \
+            -H "Upgrade-Insecure-Requests: 1" \
+            "$LINK" \
+            | gunzip -c 2>/dev/null || cat)
+          
+          # ✅ Pure grep/sed extraction (no pup needed)
+          TEXT=$(echo "$HTML" | \
+            grep -oP '<div[^>]*class="[^"]*tgme_widget_message_text[^"]*"[^>]*>.*?</div>' | \
+            head -1 | \
+            sed 's|<[^>]*>||g' | \
+            sed 's/"/"/g' | \
+            sed 's/&/\&/g' | \
+            sed 's/</</g' | \
+            sed 's/>/>/g' | \
+            sed 's/ / /g' | \
+            sed 's/<br[^>]*>/\n/g' | \
+            sed 's/<\/div[^>]*>//g' | \
+            tr -d '\r' | \
+            sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
+            sed ':a;N;$!ba;s/\n/ /g' | \
+            sed 's/  */ /g')
+          
+          # Fallback patterns
+          if [ -z "$TEXT" ] || [ ${#TEXT} -lt 3 ]; then
+            TEXT=$(echo "$HTML" | grep -oP '(?<=class="tgme_widget_message_text"[^>]*>).*?(?=</div>)' | head -1 | sed 's/<[^>]*>//g' | sed 's/&[^;]*;//g')
+          fi
+          
+          if [ -z "$TEXT" ] || [ ${#TEXT} -lt 3 ]; then
+            TEXT=$(echo "$HTML" | grep -i -A 5 'message_text' | grep -oP '[^<>\n]{10,}' | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          fi
+          
+          # Final cleanup
+          TEXT=$(echo "$TEXT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed 's/  */ /g' | sed 's/^"//;s/"$//')
+          
+          if [ -z "$TEXT" ] || [ "$TEXT" = "null" ] || [ ${#TEXT} -lt 2 ]; then
+            TEXT="[هیچ کپشن/متنی یافت نشد]"
+          fi
           
           TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S UTC')
           LENGTH=${#TEXT}
           
-          echo "✅ Caption extracted! (${LENGTH} chars)"
-          echo "📝 Preview: ${TEXT:0:100}..."
+          echo "✅ متن استخراج شد! (${LENGTH} کاراکتر)"
+          echo "📝 پیش‌نمایش: ${TEXT:0:100}..."
+          echo "📏 طول کامل: $LENGTH کاراکتر"
           
           # Save metadata
           cat > metadata.json << EOF
@@ -89,10 +106,11 @@ jobs:
             "post_id": "$POST_ID",
             "timestamp": "$TIMESTAMP",
             "length": $LENGTH,
-            "preview": "${TEXT:0:200}"
+            "text": "$TEXT"
           }
           EOF
           
+          # Output for next steps
           echo "text<<EOF" >> $GITHUB_OUTPUT
           echo "$TEXT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -110,16 +128,16 @@ jobs:
           
           mkdir -p "texts/$CHANNEL"
           
-          # 1. Raw text file
+          # 1. Raw text (.txt)
           FILENAME="post_${POST_ID}_caption.txt"
           echo "$TEXT" > "texts/$CHANNEL/$FILENAME"
           
-          # 2. Markdown file
+          # 2. Markdown (.md)
           MD_FILE="post_${POST_ID}_caption.md"
           cat > "texts/$CHANNEL/$MD_FILE" << MD_EOF
-          # 📝 [$CHANNEL - Post #$POST_ID]($LINK)
+          # 📝 [@$CHANNEL - پست #$POST_ID]($LINK)
           
-          **Date:** $(date '+%Y-%m-%d %H:%M:%S UTC') Length:** ${LENGTH} characters
+          **تاریخ:** $(date '+%Y-%m-%d %H:%M:%S UTC') طول:** ${LENGTH} کاراکتر
           
           ---
           
@@ -128,8 +146,7 @@ jobs:
           \`\`\`
           
           ---
-          
-          *Extracted by Telegram Text Downloader*
+          *استخراج شده توسط Telegram Text Downloader*
           MD_EOF
           
           # 3. HTML (if enabled)
@@ -137,37 +154,59 @@ jobs:
             HTML_FILE="post_${POST_ID}_caption.html"
             cat > "texts/$CHANNEL/$HTML_FILE" << HTML_EOF
             <!DOCTYPE html>
-            <html><head>
+            <html dir="rtl"><head>
               <meta charset="UTF-8">
-              <title>$CHANNEL - Post #$POST_ID</title>
+              <meta name="viewport" content="width=device-width,initial-scale=1">
+              <title>@$CHANNEL - پست #$POST_ID</title>
               <style>
-                body{font-family:Segoe UI,Tahoma,Geneva,Verdana,sans-serif;max-width:800px;margin:40px auto;padding:20px;background:#f5f5f5;color:#333;line-height:1.6}
-                .header{background:#0088cc;color:white;padding:20px;border-radius:8px;text-align:center}
-                .content{background:white;padding:30px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.1)}
-                pre{font-size:16px;white-space:pre-wrap;background:#f8f9fa;padding:20px;border-radius:6px;border:1px solid #e9ecef}
-                .footer{font-size:14px;color:#666;text-align:center;margin-top:30px;padding-top:20px;border-top:1px solid #e9ecef}
-                .link{display:inline-block;background:#0088cc;color:white;padding:10px 20px;text-decoration:none;border-radius:6px;margin:10px 0}
+                *{margin:0;padding:0;box-sizing:border-box}
+                body{font-family:'Vazir','Tahoma',sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;padding:20px}
+                .container{max-width:900px;margin:0 auto;background:white;border-radius:20px;box-shadow:0 20px 40px rgba(0,0,0,0.1);overflow:hidden}
+                .header{background:linear-gradient(135deg,#0088cc,#005f99);color:white;padding:30px;text-align:center}
+                .header h1{font-size:2em;margin-bottom:10px}
+                .content{padding:40px;line-height:1.8}
+                .text-block{background:#f8f9fa;border:2px solid #e9ecef;border-radius:15px;padding:30px;margin:25px 0;font-size:16px;white-space:pre-wrap;direction:rtl;text-align:right}
+                .info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;margin:30px 0}
+                .info-card{background:#f8f9fa;padding:20px;border-radius:12px;border-left:5px solid #0088cc}
+                .link{display:inline-block;background:#0088cc;color:white;padding:15px 30px;text-decoration:none;border-radius:50px;font-weight:bold;margin:20px 0;transition:all 0.3s}
+                .link:hover{background:#006699;transform:translateY(-2px)}
+                .footer{text-align:center;padding:30px;background:#f8f9fa;color:#666;font-size:14px}
+                @media(max-width:768px){.content{padding:20px}.header{padding:20px}}
               </style>
             </head><body>
-              <div class="header">
-                <h1>📱 Telegram Post</h1>
-                <p><strong>$CHANNEL</strong> · Post #$POST_ID</p>
-              </div>
-              <div class="content">
-                <p><a href="$LINK" class="link" target="_blank">🔗 View Original Post</a></p>
-                <h2>💬 Caption/Text:</h2>
-                <pre>$TEXT</pre>
-                <p><strong>Length:</strong> ${LENGTH} characters</p>
-              </div>
-              <div class="footer">
-                Extracted: $(date) | Telegram Text Downloader
+              <div class="container">
+                <div class="header">
+                  <h1>📱 پست تلگرام</h1>
+                  <p><strong>@$CHANNEL</strong> · پست شماره <strong>#$POST_ID</strong></p>
+                </div>
+                <div class="content">
+                  <a href="$LINK" class="link" target="_blank">🔗 مشاهده پست اصلی</a>
+                  <div class="info-grid">
+                    <div class="info-card">
+                      <h3>📏 طول متن</h3>
+                      <strong>${LENGTH} کاراکتر</strong>
+                    </div>
+                    <div class="info-card">
+                      <h3>📅 تاریخ استخراج</h3>
+                      <strong>$(date '+%Y-%m-%d %H:%M:%S UTC')</strong>
+                    </div>
+                  </div>
+                  <h2>💬 متن/کپشن:</h2>
+                  <div class="text-block">$TEXT</div>
+                </div>
+                <div class="footer">
+                  استخراج شده توسط <strong>Telegram Text Downloader</strong><br>
+                  <small>🔗 <a href="https://github.com">GitHub Actions</a></small>
+                </div>
               </div>
             </body></html>
             HTML_EOF
           fi
           
-          echo "✅ Files saved:"
-          ls -la texts/$CHANNEL/
+          echo ""
+          echo "✅ فایل‌ها ذخیره شد:"
+          ls -lh "texts/$CHANNEL/"
+          echo "📁 مسیر: texts/$CHANNEL/"
 
       - name: 📤 Upload to GitHub
         run: |
@@ -176,39 +215,28 @@ jobs:
           
           CHANNEL="${{ steps.extract.outputs.channel }}"
           
-          if [ ! -d "texts/$CHANNEL" ]; then
-            echo "❌ No text files found!"
-            exit 1
-          fi
-          
-          # Add all new files
-          NEW_FILES=$(git status --porcelain | grep "^?? texts/$CHANNEL/" | awk '{print $2}')
-          
-          if [ -z "$NEW_FILES" ]; then
-            echo "✅ No new files to upload"
+          if [ ! -d "texts/$CHANNEL" ] || [ ! "$(ls -A texts/$CHANNEL)" ]; then
+            echo "⚠️ No text files to upload!"
             exit 0
           fi
           
-          echo "📦 Uploading $(echo "$NEW_FILES" | wc -l) files..."
-          
           git add texts/
-          git commit -m "📝 Extracted text from @${CHANNEL} [skip ci]" || exit 0
-          git push origin main || exit 0
+          git commit -m "📝 [@${{ steps.extract.outputs.channel }} - پست #${{ steps.extract.outputs.post_id }}] [skip ci]" || echo "No changes to commit"
+          git push origin main || echo "Push failed or no changes"
           
-          echo ""
-          echo "🎉 SUCCESS! Check: texts/$CHANNEL/"
+          echo "🎉 آپلود کامل!"
 
       - name: 📋 Final Report
         if: always()
         run: |
           echo ""
           echo "┌─────────────────────────────────────────────────────────────┐"
-          echo "│                📝 TEXT EXTRACTION REPORT                   │"
+          echo "│                📝 گزارش استخراج متن                       │"
           echo "├─────────────────────────────────────────────────────────────┤"
-          echo "│ 🔗 Link: ${{ github.event.inputs.telegram_link }}"
-          echo "│ 📁 Path: ./texts/"
-          echo "│ 📄 Length: ${{ steps.extract.outputs.length }} chars"
-          echo "│ 👤 Channel: ${{ steps.extract.outputs.channel }}"
+          echo "│ 🔗 لینک: ${{ github.event.inputs.telegram_link }}"
+          echo "│ 📁 مسیر: ./texts/${{ steps.extract.outputs.channel }}/ "
+          echo "│ 📄 طول: ${{ steps.extract.outputs.length }} کاراکتر"
+          echo "│ 👤 کانال: @${{ steps.extract.outputs.channel }}"
           echo "└─────────────────────────────────────────────────────────────┘"
           echo ""
-          echo "✅ Ready for next post! 🚀"
+          echo "✅ آماده پست بعدی! 🚀"
